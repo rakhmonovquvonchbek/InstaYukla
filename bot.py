@@ -25,6 +25,16 @@ class InstagramDownloader:
     
     def create_fresh_loader(self):
         """Create a fresh instaloader instance for each request"""
+        # Rotate between different user agents
+        user_agents = [
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 15_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Mobile/15E148 Safari/604.1',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Mobile/15E148 Safari/604.1',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
+        ]
+        
+        import random
+        selected_ua = random.choice(user_agents)
+        
         loader = instaloader.Instaloader(
             download_pictures=True,
             download_videos=True,
@@ -33,30 +43,31 @@ class InstagramDownloader:
             download_comments=False,
             save_metadata=False,
             compress_json=False,
-            user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 12_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 105.0.0.11.118 (iPhone11,8; iOS 12_3_1; en_US; en-US; scale=2.00; 828x1792; 165586599)'
+            user_agent=selected_ua
         )
         
         # Try to login, but don't fail if it doesn't work
         instagram_username = os.getenv('INSTAGRAM_USERNAME')
         instagram_password = os.getenv('INSTAGRAM_PASSWORD')
         
+        print(f"DEBUG: Using User Agent: {selected_ua[:50]}...")
         print(f"DEBUG: Environment check - Username exists: {instagram_username is not None}")
-        print(f"DEBUG: Environment check - Password exists: {instagram_password is not None}")
         
         if instagram_username and instagram_password:
             try:
-                # Try login with retry
-                for attempt in range(3):
+                # Try login with retry and delays
+                for attempt in range(2):  # Reduced attempts to avoid triggering more blocks
                     try:
+                        print(f"DEBUG: Login attempt {attempt + 1}")
                         loader.login(instagram_username, instagram_password)
                         print(f"DEBUG: Successfully logged in as {instagram_username}")
                         break
                     except Exception as login_error:
                         print(f"DEBUG: Login attempt {attempt + 1} failed: {login_error}")
-                        if attempt < 2:
-                            time.sleep(2)
+                        if attempt < 1:
+                            time.sleep(5)  # Longer delay between attempts
                         else:
-                            print("DEBUG: All login attempts failed, continuing without login")
+                            print("DEBUG: Login failed, continuing without authentication")
             except Exception as e:
                 print(f"DEBUG: Login setup failed: {e}")
         else:
