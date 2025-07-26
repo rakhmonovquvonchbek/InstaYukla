@@ -228,7 +228,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Main function to run the bot"""
     # Replace 'YOUR_BOT_TOKEN' with your actual bot token from BotFather
-    BOT_TOKEN = "8361203216:AAGkbDrgzyC-2J-pzxBSJuwMwsNmgqVsY34"
+    BOT_TOKEN = os.getenv('BOT_TOKEN', "8361203216:AAGkbDrgzyC-2J-pzxBSJuwMwsNmgqVsY34")
     
     if BOT_TOKEN == "YOUR_BOT_TOKEN":
         print("❌ Please set your bot token!")
