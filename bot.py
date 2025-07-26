@@ -34,6 +34,20 @@ class InstagramDownloader:
             compress_json=False,
             user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 12_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 105.0.0.11.118 (iPhone11,8; iOS 12_3_1; en_US; en-US; scale=2.00; 828x1792; 165586599)'
         )
+        
+        # Login with Instagram credentials (helps avoid 401 errors)
+        instagram_username = os.getenv('INSTAGRAM_USERNAME')
+        instagram_password = os.getenv('INSTAGRAM_PASSWORD')
+        
+        if instagram_username and instagram_password:
+            try:
+                loader.login(instagram_username, instagram_password)
+                print(f"DEBUG: Successfully logged in as {instagram_username}")
+            except Exception as e:
+                print(f"DEBUG: Login failed: {e}")
+        else:
+            print("DEBUG: No Instagram credentials provided")
+        
         return loader
     
     def extract_shortcode(self, url):
@@ -62,47 +76,66 @@ class InstagramDownloader:
             if not shortcode:
                 return None, "Invalid Instagram URL"
             
+            print(f"\n=== DEBUG: Starting download for shortcode: {shortcode} ===")
+            print(f"DEBUG: Temp directory: {temp_dir}")
+            print(f"DEBUG: Files in temp_dir BEFORE download: {os.listdir(temp_dir)}")
+            
             # Create a fresh loader instance for this request
             loader = self.create_fresh_loader()
             
             # Create a unique subdirectory for this specific request
-            import uuid
             unique_subdir = os.path.join(temp_dir, f"download_{uuid.uuid4().hex[:8]}")
             os.makedirs(unique_subdir, exist_ok=True)
+            print(f"DEBUG: Created unique subdir: {unique_subdir}")
             
             # Retry mechanism for authentication issues
             max_retries = 3
             for attempt in range(max_retries):
                 try:
                     post = instaloader.Post.from_shortcode(loader.context, shortcode)
+                    print(f"DEBUG: Post object created successfully")
+                    print(f"DEBUG: Post has {post.mediacount} media items")
                     
                     # Download to the unique subdirectory
                     loader.dirname_pattern = unique_subdir
+                    print(f"DEBUG: About to download to: {unique_subdir}")
                     loader.download_post(post, target=unique_subdir)
+                    print(f"DEBUG: Download completed")
+                    
+                    # Check what was downloaded
+                    print(f"DEBUG: Files in unique_subdir after download: {os.listdir(unique_subdir)}")
+                    print(f"DEBUG: Files in temp_dir after download: {os.listdir(temp_dir)}")
                     
                     # Get ONLY files from our unique subdirectory
                     files = []
                     for file in os.listdir(unique_subdir):
+                        full_path = os.path.join(unique_subdir, file)
+                        print(f"DEBUG: Checking file: {file}")
                         if file.endswith(('.jpg', '.jpeg', '.png', '.mp4')):
-                            files.append(os.path.join(unique_subdir, file))
+                            files.append(full_path)
+                            print(f"DEBUG: Added media file: {file}")
                     
                     # Sort files to maintain consistent order
                     files.sort()
                     
-                    # Debug: log what files we found
-                    logger.info(f"Found {len(files)} files for shortcode {shortcode}: {[os.path.basename(f) for f in files]}")
+                    print(f"DEBUG: Final files list: {[os.path.basename(f) for f in files]}")
+                    print(f"=== DEBUG: Returning {len(files)} files ===\n")
                     
                     return files, None
                     
                 except instaloader.exceptions.ConnectionException as e:
+                    print(f"DEBUG: Connection exception: {e}")
                     if "401" in str(e) and attempt < max_retries - 1:
-                        # Wait and retry with fresh loader
-                        await asyncio.sleep(2)
+                        print(f"DEBUG: 401 error, retrying... (attempt {attempt + 1})")
+                        await asyncio.sleep(5)  # Longer wait
                         loader = self.create_fresh_loader()
                         continue
+                    elif "429" in str(e):
+                        return None, "Instagram rate limit reached. Please wait 10-15 minutes before trying again."
                     else:
-                        return None, "Instagram temporarily blocked access. Try again later."
+                        return None, "Instagram temporarily blocked access. This is common on cloud servers. Try again in a few minutes."
                 except Exception as e:
+                    print(f"DEBUG: Exception during download: {e}")
                     if attempt < max_retries - 1:
                         await asyncio.sleep(1)
                         loader = self.create_fresh_loader()
@@ -111,6 +144,7 @@ class InstagramDownloader:
                         raise e
             
         except Exception as e:
+            print(f"DEBUG: Outer exception: {e}")
             error_msg = str(e)
             if "401" in error_msg:
                 return None, "Instagram authentication failed. The content might be private or temporarily unavailable."
@@ -228,11 +262,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Main function to run the bot"""
     # Replace 'YOUR_BOT_TOKEN' with your actual bot token from BotFather
-    BOT_TOKEN = os.getenv('BOT_TOKEN', "8361203216:AAGkbDrgzyC-2J-pzxBSJuwMwsNmgqVsY34")
+    BOT_TOKEN = "YOUR_BOT_TOKEN"
     
     if BOT_TOKEN == "YOUR_BOT_TOKEN":
         print("❌ Please set your bot token!")
-        print("1. Message @BotFather on Telegram")
+        print("1. Messasge @BotFather on Telegram")
         print("2. Create a new bot with /newbot")
         print("3. Copy the token and replace 'YOUR_BOT_TOKEN' in the code")
         return
