@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import tempfile
 import logging
 import uuid
+import time
 
 # Set up logging
 logging.basicConfig(
@@ -35,16 +36,29 @@ class InstagramDownloader:
             user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 12_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 105.0.0.11.118 (iPhone11,8; iOS 12_3_1; en_US; en-US; scale=2.00; 828x1792; 165586599)'
         )
         
-        # Login with Instagram credentials (helps avoid 401 errors)
+        # Try to login, but don't fail if it doesn't work
         instagram_username = os.getenv('INSTAGRAM_USERNAME')
         instagram_password = os.getenv('INSTAGRAM_PASSWORD')
         
+        print(f"DEBUG: Environment check - Username exists: {instagram_username is not None}")
+        print(f"DEBUG: Environment check - Password exists: {instagram_password is not None}")
+        
         if instagram_username and instagram_password:
             try:
-                loader.login(instagram_username, instagram_password)
-                print(f"DEBUG: Successfully logged in as {instagram_username}")
+                # Try login with retry
+                for attempt in range(3):
+                    try:
+                        loader.login(instagram_username, instagram_password)
+                        print(f"DEBUG: Successfully logged in as {instagram_username}")
+                        break
+                    except Exception as login_error:
+                        print(f"DEBUG: Login attempt {attempt + 1} failed: {login_error}")
+                        if attempt < 2:
+                            time.sleep(2)
+                        else:
+                            print("DEBUG: All login attempts failed, continuing without login")
             except Exception as e:
-                print(f"DEBUG: Login failed: {e}")
+                print(f"DEBUG: Login setup failed: {e}")
         else:
             print("DEBUG: No Instagram credentials provided")
         
@@ -89,9 +103,15 @@ class InstagramDownloader:
             print(f"DEBUG: Created unique subdir: {unique_subdir}")
             
             # Retry mechanism for authentication issues
-            max_retries = 3
+            max_retries = 5  # Increased retries
             for attempt in range(max_retries):
                 try:
+                    # Add delay between attempts to avoid rate limiting
+                    if attempt > 0:
+                        wait_time = attempt * 3  # 3, 6, 9, 12 seconds
+                        print(f"DEBUG: Waiting {wait_time} seconds before retry...")
+                        await asyncio.sleep(wait_time)
+                    
                     post = instaloader.Post.from_shortcode(loader.context, shortcode)
                     print(f"DEBUG: Post object created successfully")
                     print(f"DEBUG: Post has {post.mediacount} media items")
@@ -262,11 +282,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Main function to run the bot"""
     # Replace 'YOUR_BOT_TOKEN' with your actual bot token from BotFather
-    BOT_TOKEN = "YOUR_BOT_TOKEN"
+    BOT_TOKEN = "8361203216:AAGkbDrgzyC-2J-pzxBSJuwMwsNmgqVsY34"
     
     if BOT_TOKEN == "YOUR_BOT_TOKEN":
         print("❌ Please set your bot token!")
-        print("1. Messasge @BotFather on Telegram")
+        print("1. Message @BotFather on Telegram")
         print("2. Create a new bot with /newbot")
         print("3. Copy the token and replace 'YOUR_BOT_TOKEN' in the code")
         return
