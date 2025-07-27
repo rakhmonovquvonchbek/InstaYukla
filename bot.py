@@ -1,10 +1,11 @@
 import os
 import re
-import requests
 import tempfile
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from instagrapi import Client
+from instagrapi.exceptions import *
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -12,133 +13,92 @@ logger = logging.getLogger(__name__)
 
 class InstagramDownloader:
     def __init__(self):
-        self.session = requests.Session()
-        
-    def get_post_data(self, shortcode):
-        """Get post data using Instagram's public GraphQL endpoint"""
-        try:
-            # Instagram's public endpoint for post data
-            url = f"https://www.instagram.com/graphql/query/"
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Mobile/15E148 Safari/604.1',
-                'Accept': '*/*',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'X-CSRFToken': 'missing',
-                'X-Requested-With': 'XMLHttpRequest',
-                'Connection': 'keep-alive',
-            }
-            
-            # Try to get post info without authentication
-            simple_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
-            
-            response = self.session.get(simple_url, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    return data
-                except:
-                    # If JSON fails, try to extract from HTML
-                    return self.extract_from_html(response.text)
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error getting post data: {e}")
-            return None
+        self.client = None
+        self.logged_in = False
     
-    def extract_from_html(self, html_content):
-        """Extract media URLs from HTML content"""
+    def login(self):
+        """Login to Instagram"""
+        if self.logged_in:
+            return True
+            
         try:
-            # Look for video URL
-            video_match = re.search(r'"video_url":"([^"]+)"', html_content)
-            if video_match:
-                video_url = video_match.group(1).replace('\\u0026', '&').replace('\\/', '/')
-                return {'video_url': video_url, 'is_video': True}
+            username = os.getenv('INSTAGRAM_USERNAME')
+            password = os.getenv('INSTAGRAM_PASSWORD')
             
-            # Look for image URL
-            image_match = re.search(r'"display_url":"([^"]+)"', html_content)
-            if image_match:
-                image_url = image_match.group(1).replace('\\u0026', '&').replace('\\/', '/')
-                return {'display_url': image_url, 'is_video': False}
+            if not username or not password:
+                logger.error("Instagram credentials not found")
+                return False
             
-            return None
+            self.client = Client()
             
+            # Try to login
+            logger.info(f"Attempting to login as {username}")
+            self.client.login(username, password)
+            
+            self.logged_in = True
+            logger.info("Successfully logged in to Instagram")
+            return True
+            
+        except BadCredentialsException:
+            logger.error("Bad Instagram credentials")
+            return False
+        except TwoFactorRequired:
+            logger.error("Two-factor authentication required - please disable it temporarily")
+            return False
+        except ChallengeRequired:
+            logger.error("Challenge required - Instagram wants to verify the account")
+            return False
         except Exception as e:
-            logger.error(f"Error extracting from HTML: {e}")
-            return None
+            logger.error(f"Login failed: {e}")
+            return False
     
-    def download_media(self, url, filename):
-        """Download media file"""
+    def extract_media_id(self, url):
+        """Extract media ID from Instagram URL"""
         try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15',
-                'Accept': '*/*',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-            }
-            
-            response = self.session.get(url, headers=headers, timeout=60, stream=True)
-            response.raise_for_status()
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=filename) as temp_file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        temp_file.write(chunk)
-                return temp_file.name
-                
+            if not self.client:
+                return None
+            return self.client.media_pk_from_url(url)
         except Exception as e:
-            logger.error(f"Download failed: {e}")
+            logger.error(f"Error extracting media ID: {e}")
             return None
-    
-    def extract_shortcode(self, url):
-        """Extract shortcode from Instagram URL"""
-        patterns = [
-            r'instagram\.com/p/([A-Za-z0-9_-]+)',
-            r'instagram\.com/reel/([A-Za-z0-9_-]+)',
-            r'instagram\.com/tv/([A-Za-z0-9_-]+)'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                return match.group(1)
-        return None
     
     async def download_instagram_post(self, url):
-        """Main download function"""
+        """Download Instagram post"""
         try:
-            shortcode = self.extract_shortcode(url)
-            if not shortcode:
-                return None, "Invalid Instagram URL"
+            # Login if not already logged in
+            if not self.login():
+                return None, "❌ Instagram login failed. Check your credentials."
             
-            logger.info(f"Processing shortcode: {shortcode}")
+            # Extract media ID
+            media_pk = self.extract_media_id(url)
+            if not media_pk:
+                return None, "❌ Invalid Instagram URL or could not extract media ID."
             
-            # Get post data
-            post_data = self.get_post_data(shortcode)
-            if not post_data:
-                return None, "Could not fetch post data. The post might be private or deleted."
+            logger.info(f"Processing media ID: {media_pk}")
             
-            # Check if it's a video or image
-            if post_data.get('is_video') and post_data.get('video_url'):
-                # Download video
-                file_path = self.download_media(post_data['video_url'], '.mp4')
-                if file_path:
-                    return file_path, "video"
-            elif post_data.get('display_url'):
-                # Download image
-                file_path = self.download_media(post_data['display_url'], '.jpg')
-                if file_path:
-                    return file_path, "photo"
+            # Get media info
+            media_info = self.client.media_info(media_pk)
             
-            return None, "Could not extract media from the post"
-            
+            if media_info.media_type == 2:  # Video
+                logger.info("Downloading video...")
+                file_path = self.client.video_download(media_pk)
+                return file_path, "video"
+            else:  # Photo
+                logger.info("Downloading photo...")
+                file_path = self.client.photo_download(media_pk)  
+                return file_path, "photo"
+                
+        except LoginRequired:
+            logger.error("Login required")
+            self.logged_in = False
+            return None, "❌ Instagram login expired. Try again."
+        except MediaNotFound:
+            return None, "❌ Post not found. It might be deleted or private."
+        except PrivateError:
+            return None, "❌ This is a private account. Cannot download content."
         except Exception as e:
-            logger.error(f"Error in download_instagram_post: {e}")
-            return None, f"Download failed: {str(e)}"
+            logger.error(f"Download error: {e}")
+            return None, f"❌ Download failed: {str(e)}"
 
 # Initialize downloader
 downloader = InstagramDownloader()
@@ -148,10 +108,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 **Instagram Downloader Bot**\n\n"
         "Send me an Instagram post/reel URL and I'll download it!\n\n"
-        "Supported:\n"
+        "**Supported:**\n"
         "• instagram.com/p/...\n"
-        "• instagram.com/reel/...\n\n"
-        "Just paste the link and I'll handle the rest!",
+        "• instagram.com/reel/...\n"
+        "• instagram.com/tv/...\n\n"
+        "**Note:** This bot requires Instagram login and works with public posts.",
         parse_mode='Markdown'
     )
 
@@ -160,25 +121,25 @@ async def handle_instagram_url(update: Update, context: ContextTypes.DEFAULT_TYP
     text = update.message.text.strip()
     
     # Check if it's an Instagram URL
-    if not re.search(r'instagram\.com/(p|reel)/', text):
-        await update.message.reply_text("❌ Please send a valid Instagram post or reel URL.")
+    if not re.search(r'instagram\.com/(p|reel|tv)/', text):
+        await update.message.reply_text("❌ Please send a valid Instagram post, reel, or TV URL.")
         return
     
     # Send processing message
-    msg = await update.message.reply_text("⏳ Processing...")
+    msg = await update.message.reply_text("⏳ Processing your request...")
     
     try:
         # Download the post
         file_path, file_type = await downloader.download_instagram_post(text)
         
-        if file_path:
+        if file_path and os.path.exists(file_path):
             # Send the downloaded file
             if file_type == "video":
                 with open(file_path, 'rb') as video:
-                    await update.message.reply_video(video, caption="📹 Downloaded!")
+                    await update.message.reply_video(video, caption="📹 Here's your video!")
             else:
                 with open(file_path, 'rb') as photo:
-                    await update.message.reply_photo(photo, caption="📸 Downloaded!")
+                    await update.message.reply_photo(photo, caption="📸 Here's your photo!")
             
             # Clean up
             try:
@@ -187,21 +148,35 @@ async def handle_instagram_url(update: Update, context: ContextTypes.DEFAULT_TYP
                 pass
                 
             await msg.delete()
+            await update.message.reply_text("✅ Download completed!")
         else:
-            await msg.edit_text(f"❌ {file_type}")
+            await msg.edit_text(f"{file_type}")
             
     except Exception as e:
+        logger.error(f"Handler error: {e}")
         await msg.edit_text(f"❌ Error: {str(e)}")
 
 def main():
     """Main function"""
     token = os.getenv('TELEGRAM_BOT_TOKEN')
+    instagram_username = os.getenv('INSTAGRAM_USERNAME')
+    instagram_password = os.getenv('INSTAGRAM_PASSWORD')
+    
+    logger.info("=== INSTAGRAM DOWNLOADER BOT ===")
+    logger.info(f"Telegram Token: {'✅ Found' if token else '❌ Missing'}")
+    logger.info(f"Instagram Username: {'✅ Found' if instagram_username else '❌ Missing'} - {instagram_username}")
+    logger.info(f"Instagram Password: {'✅ Found' if instagram_password else '❌ Missing'}")
+    logger.info("===============================")
     
     if not token:
-        print("❌ TELEGRAM_BOT_TOKEN not found!")
+        logger.error("TELEGRAM_BOT_TOKEN not found!")
+        return
+        
+    if not instagram_username or not instagram_password:
+        logger.error("Instagram credentials not found!")
         return
     
-    print("🚀 Starting bot...")
+    logger.info("🚀 Starting bot...")
     
     # Create application
     app = Application.builder().token(token).build()
