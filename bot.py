@@ -1,231 +1,205 @@
 import os
 import re
 import requests
-import instaloader
+import json
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import asyncio
-from urllib.parse import urlparse
 import tempfile
 import logging
 import time
 import random
-from datetime import datetime, timedelta
+from urllib.parse import quote
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 class InstagramDownloader:
     def __init__(self):
-        self.session_cache = {}
-        self.last_request_time = {}
+        self.session = requests.Session()
         self.user_agents = [
             'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-            'Mozilla/5.0 (Android 12; Mobile; rv:91.0) Gecko/91.0 Firefox/91.0',
             'Mozilla/5.0 (iPhone; CPU iPhone OS 15_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Mobile/15E148 Safari/604.1',
-            'Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'Mozilla/5.0 (Android 12; Mobile; rv:91.0) Gecko/91.0 Firefox/91.0',
+            'Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36'
         ]
+        
+    def get_headers(self):
+        return {
+            'User-Agent': random.choice(self.user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
     
-    def create_fresh_loader(self, user_agent_index=0):
-        """Create a fresh instaloader instance with rotating user agents"""
+    def extract_shortcode(self, url):
+        """Extract shortcode from Instagram URL"""
+        patterns = [
+            r'instagram\.com/p/([A-Za-z0-9_-]+)',
+            r'instagram\.com/reel/([A-Za-z0-9_-]+)',
+            r'instagram\.com/tv/([A-Za-z0-9_-]+)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        return None
+    
+    async def download_with_third_party_api(self, url):
+        """Try downloading using third-party Instagram downloaders"""
+        shortcode = self.extract_shortcode(url)
+        if not shortcode:
+            return None, "Invalid Instagram URL"
+        
+        # Method 1: Try Instagram's public embed API
         try:
-            # Create session directory
-            session_dir = f"/tmp/session_{user_agent_index}"
-            os.makedirs(session_dir, exist_ok=True)
+            logger.info("Trying Instagram embed API...")
+            embed_url = f"https://www.instagram.com/p/{shortcode}/embed/"
             
-            loader = instaloader.Instaloader(
-                download_pictures=True,
-                download_videos=True,
-                download_video_thumbnails=False,
-                compress_json=False,
-                post_metadata_txt_pattern="",
-                dirname_pattern=session_dir,
-                filename_pattern="{shortcode}",
-                request_timeout=30,
-                max_connection_attempts=3,
-                sleep=True,  # Enable sleep between requests
-                user_agent=self.user_agents[user_agent_index % len(self.user_agents)]
-            )
+            headers = self.get_headers()
+            response = self.session.get(embed_url, headers=headers, timeout=30)
             
-            # Set custom headers to look more like a real browser
-            if hasattr(loader.context, '_session'):
-                loader.context._session.headers.update({
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                })
-            
-            return loader, session_dir
+            if response.status_code == 200:
+                # Look for media URLs in the embed response
+                content = response.text
+                
+                # Search for video URLs
+                video_patterns = [
+                    r'"video_url":"([^"]+)"',
+                    r'video_url&quot;:&quot;([^&]+)&quot;',
+                    r'videoUrl":"([^"]+)"'
+                ]
+                
+                for pattern in video_patterns:
+                    match = re.search(pattern, content)
+                    if match:
+                        video_url = match.group(1).replace('\\u0026', '&').replace('\/', '/')
+                        logger.info(f"Found video URL: {video_url[:50]}...")
+                        return await self.download_media(video_url, 'mp4')
+                
+                # Search for image URLs
+                image_patterns = [
+                    r'"display_url":"([^"]+)"',
+                    r'display_url&quot;:&quot;([^&]+)&quot;',
+                    r'displayUrl":"([^"]+)"'
+                ]
+                
+                for pattern in image_patterns:
+                    match = re.search(pattern, content)
+                    if match:
+                        image_url = match.group(1).replace('\\u0026', '&').replace('\/', '/')
+                        logger.info(f"Found image URL: {image_url[:50]}...")
+                        return await self.download_media(image_url, 'jpg')
+                        
         except Exception as e:
-            logger.error(f"Error creating loader: {e}")
-            return None, None
-    
-    def smart_delay(self, base_delay=2):
-        """Add smart delays between requests"""
-        # Random delay between base_delay and base_delay*2
-        delay = random.uniform(base_delay, base_delay * 2)
-        logger.info(f"Waiting {delay:.1f} seconds...")
-        time.sleep(delay)
-    
-    def login_with_retry(self, loader, max_attempts=5):
-        """Login with multiple retry strategies"""
-        username = os.getenv('INSTAGRAM_USERNAME')
-        password = os.getenv('INSTAGRAM_PASSWORD')
+            logger.warning(f"Embed API failed: {e}")
         
-        if not username or not password:
-            logger.error("Instagram credentials not found in environment variables")
-            return False
+        # Method 2: Try oEmbed API
+        try:
+            logger.info("Trying oEmbed API...")
+            oembed_url = f"https://www.instagram.com/oembed/?url={quote(url)}"
+            
+            response = self.session.get(oembed_url, headers=self.get_headers(), timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'thumbnail_url' in data:
+                    thumbnail_url = data['thumbnail_url']
+                    logger.info(f"Found thumbnail: {thumbnail_url[:50]}...")
+                    return await self.download_media(thumbnail_url, 'jpg')
+                    
+        except Exception as e:
+            logger.warning(f"oEmbed API failed: {e}")
         
-        for attempt in range(max_attempts):
-            try:
-                logger.info(f"Login attempt {attempt + 1}/{max_attempts}")
+        # Method 3: Try web scraping approach
+        try:
+            logger.info("Trying web scraping...")
+            post_url = f"https://www.instagram.com/p/{shortcode}/"
+            
+            headers = self.get_headers()
+            headers['X-Requested-With'] = 'XMLHttpRequest'
+            
+            response = self.session.get(post_url, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                content = response.text
                 
-                # Progressive delay - longer delays for later attempts
-                if attempt > 0:
-                    delay = min(30 * (2 ** attempt), 300)  # Max 5 minutes
-                    logger.info(f"Waiting {delay} seconds before retry...")
-                    time.sleep(delay)
+                # Look for JSON data in script tags
+                json_patterns = [
+                    r'window\._sharedData = ({.*?});',
+                    r'"GraphVideo".*?"video_url":"([^"]+)"',
+                    r'"GraphImage".*?"display_url":"([^"]+)"'
+                ]
                 
-                # Try to login
-                loader.login(username, password)
-                logger.info("Login successful!")
-                return True
-                
-            except instaloader.exceptions.BadCredentialsException:
-                logger.error("Bad credentials - check username/password")
-                return False
-                
-            except instaloader.exceptions.TwoFactorAuthRequiredException:
-                logger.error("Two-factor authentication required - please disable it temporarily")
-                return False
-                
-            except instaloader.exceptions.ConnectionException as e:
-                logger.warning(f"Connection error on attempt {attempt + 1}: {e}")
-                if "429" in str(e) or "rate limit" in str(e).lower():
-                    # Rate limited - wait longer
-                    wait_time = min(60 * (attempt + 1), 600)  # Up to 10 minutes
-                    logger.info(f"Rate limited, waiting {wait_time} seconds...")
-                    time.sleep(wait_time)
-                elif "suspicious" in str(e).lower() or "blocked" in str(e).lower():
-                    logger.warning("Suspicious activity detected, using longer delay...")
-                    time.sleep(120)  # 2 minutes
-                
-            except Exception as e:
-                logger.error(f"Unexpected error during login: {e}")
-                
-        logger.error("All login attempts failed")
-        return False
+                for pattern in json_patterns:
+                    matches = re.findall(pattern, content)
+                    for match in matches:
+                        if isinstance(match, str) and (match.startswith('http') and ('jpg' in match or 'mp4' in match)):
+                            media_url = match.replace('\\u0026', '&').replace('\/', '/')
+                            ext = 'mp4' if 'mp4' in media_url else 'jpg'
+                            logger.info(f"Found media URL: {media_url[:50]}...")
+                            return await self.download_media(media_url, ext)
+                            
+        except Exception as e:
+            logger.warning(f"Web scraping failed: {e}")
+        
+        return None, "❌ Could not extract media from Instagram post. This might be a private post or the URL format is not supported."
+    
+    async def download_media(self, media_url, extension):
+        """Download media file from URL"""
+        try:
+            logger.info(f"Downloading media: {media_url[:50]}...")
+            
+            headers = self.get_headers()
+            response = self.session.get(media_url, headers=headers, timeout=60, stream=True)
+            response.raise_for_status()
+            
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{extension}') as temp_file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        temp_file.write(chunk)
+                temp_path = temp_file.name
+            
+            logger.info(f"Downloaded successfully: {temp_path}")
+            return temp_path, "video" if extension == 'mp4' else "photo"
+            
+        except Exception as e:
+            logger.error(f"Download failed: {e}")
+            return None, f"Download failed: {str(e)}"
     
     async def download_instagram_post(self, url, max_retries=3):
-        """Download Instagram post with enhanced error handling"""
+        """Main download function with fallback methods"""
         try:
-            # Extract shortcode from URL
-            shortcode_match = re.search(r'/p/([A-Za-z0-9_-]+)', url)
-            if not shortcode_match:
-                shortcode_match = re.search(r'/reel/([A-Za-z0-9_-]+)', url)
+            logger.info(f"Starting download for: {url}")
             
-            if not shortcode_match:
-                return None, "❌ Invalid Instagram URL format"
+            # Add random delay to avoid rate limiting
+            await self.smart_delay(1, 3)
             
-            shortcode = shortcode_match.group(1)
-            logger.info(f"Processing shortcode: {shortcode}")
+            # Try third-party API approach
+            result = await self.download_with_third_party_api(url)
+            if result[0]:  # If successful
+                return result
             
-            # Try with different user agents
-            for retry in range(max_retries):
-                try:
-                    logger.info(f"Attempt {retry + 1}/{max_retries}")
-                    
-                    # Use different user agent for each retry
-                    loader, session_dir = self.create_fresh_loader(retry)
-                    if not loader:
-                        continue
-                    
-                    # Smart delay between attempts
-                    if retry > 0:
-                        self.smart_delay(5 + retry * 5)
-                    
-                    # Try to login
-                    if not self.login_with_retry(loader, max_attempts=2):
-                        logger.warning(f"Login failed on attempt {retry + 1}")
-                        if retry < max_retries - 1:
-                            continue
-                        else:
-                            return None, "❌ Instagram login failed after all attempts. Try again in 10-15 minutes."
-                    
-                    # Add delay after successful login
-                    self.smart_delay(3)
-                    
-                    # Get post
-                    logger.info("Fetching post...")
-                    post = instaloader.Post.from_shortcode(loader.context, shortcode)
-                    
-                    # Check if it's a video or image
-                    if post.is_video:
-                        logger.info("Downloading video...")
-                        video_url = post.video_url
-                        response = requests.get(video_url, stream=True, timeout=30)
-                        response.raise_for_status()
-                        
-                        # Save to temporary file
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
-                            for chunk in response.iter_content(chunk_size=8192):
-                                temp_file.write(chunk)
-                            temp_path = temp_file.name
-                        
-                        return temp_path, "video"
-                    else:
-                        logger.info("Downloading image...")
-                        image_url = post.url
-                        response = requests.get(image_url, timeout=30)
-                        response.raise_for_status()
-                        
-                        # Save to temporary file
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
-                            temp_file.write(response.content)
-                            temp_path = temp_file.name
-                        
-                        return temp_path, "photo"
-                        
-                except instaloader.exceptions.LoginRequiredException:
-                    logger.warning("Login required - retrying with fresh session")
-                    continue
-                    
-                except instaloader.exceptions.PrivateProfileNotFollowedException:
-                    return None, "❌ This is a private account. Cannot download content."
-                    
-                except instaloader.exceptions.PostUnavailableException:
-                    return None, "❌ Post not found or has been deleted."
-                    
-                except instaloader.exceptions.ConnectionException as e:
-                    logger.warning(f"Connection error: {e}")
-                    if "429" in str(e) or "rate limit" in str(e).lower():
-                        wait_time = 60 * (retry + 1)
-                        logger.info(f"Rate limited, waiting {wait_time} seconds...")
-                        time.sleep(wait_time)
-                    elif "blocked" in str(e).lower() or "suspicious" in str(e).lower():
-                        wait_time = 120 + (retry * 60)
-                        logger.info(f"Blocked detected, waiting {wait_time} seconds...")
-                        time.sleep(wait_time)
-                    continue
-                    
-                except Exception as e:
-                    logger.error(f"Attempt {retry + 1} failed: {e}")
-                    if retry < max_retries - 1:
-                        self.smart_delay(10 + retry * 10)
-                        continue
-                    else:
-                        return None, f"❌ Download failed after {max_retries} attempts: {str(e)}"
-            
-            return None, "❌ Instagram temporarily blocked access. This is common on cloud servers. Try again in 10-15 minutes."
+            # If all methods fail
+            return None, "❌ Unable to download from Instagram. This could be due to:\n• Private account\n• Post deleted\n• Instagram blocking the request\n• Network issues\n\nTry again in a few minutes or with a different post."
             
         except Exception as e:
-            logger.error(f"Unexpected error in download_instagram_post: {e}")
+            logger.error(f"Unexpected error: {e}")
             return None, f"❌ Unexpected error: {str(e)}"
+    
+    async def smart_delay(self, min_seconds=1, max_seconds=3):
+        """Add random delay"""
+        delay = random.uniform(min_seconds, max_seconds)
+        logger.info(f"Waiting {delay:.1f} seconds...")
+        time.sleep(delay)
 
 # Initialize downloader
 downloader = InstagramDownloader()
@@ -241,11 +215,37 @@ Send me an Instagram post URL and I'll download it for you!
 • https://www.instagram.com/p/ABC123/
 • https://www.instagram.com/reel/ABC123/
 
-⚠️ **Note:** Due to Instagram's restrictions on cloud servers, downloads may sometimes fail. If you get a "temporarily blocked" message, please wait 10-15 minutes and try again.
+⚠️ **Important Notes:**
+• This bot works **without requiring Instagram login**
+• Some private posts may not be accessible
+• If download fails, try again in a few minutes
 
-Just send me a link to get started! 🚀
+🚀 **Just send me a link to get started!**
     """
     await update.message.reply_text(welcome_msg, parse_mode='Markdown')
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Help command handler"""
+    help_text = """
+🔗 **How to use:**
+
+1. Copy any Instagram post/reel URL
+2. Paste it here  
+3. Wait for download to complete
+4. Receive your media files!
+
+**Supported URLs:**
+• instagram.com/p/...
+• instagram.com/reel/...
+• instagram.com/tv/...
+
+**Troubleshooting:**
+• Private posts won't work
+• Very new posts might be harder to download
+• If it fails, try with an older post
+• Wait a few minutes between attempts
+    """
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def download_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle Instagram URL messages"""
@@ -273,7 +273,7 @@ async def download_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     # Send processing message
-    processing_msg = await update.message.reply_text("🔄 Processing your request... This may take a few minutes.")
+    processing_msg = await update.message.reply_text("🔄 Processing your request... This may take a moment.")
     
     try:
         # Download the post
@@ -326,22 +326,12 @@ def main():
                 logger.error(f"  {key}")
         return
     
-    # Verify Instagram credentials are available
-    instagram_username = os.getenv('INSTAGRAM_USERNAME')
-    instagram_password = os.getenv('INSTAGRAM_PASSWORD')
-    
-    logger.info("=== ENVIRONMENT CHECK ===")
+    logger.info("=== NO-LOGIN INSTAGRAM BOT ===")
     logger.info(f"Bot Token: {'✅ Found' if bot_token else '❌ Missing'}")
-    logger.info(f"Instagram Username: {'✅ Found' if instagram_username else '❌ Missing'} - {instagram_username}")
-    logger.info(f"Instagram Password: {'✅ Found' if instagram_password else '❌ Missing'}")
-    logger.info("========================")
+    logger.info("Instagram Login: ⚠️ Not Required (using public APIs)")
+    logger.info("=============================")
     
-    if not instagram_username or not instagram_password:
-        logger.error("Instagram credentials not found in environment variables")
-        logger.error("Make sure INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD are set in Railway")
-        return
-    
-    logger.info("Starting Instagram Downloader Bot...")
+    logger.info("Starting Instagram Downloader Bot (No Login Required)...")
     
     # Create application
     application = Application.builder().token(bot_token).build()
@@ -353,25 +343,6 @@ def main():
     
     # Start the bot
     application.run_polling()
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Help command handler"""
-    help_text = """
-🔗 **How to use:**
-
-1. Copy any Instagram post/reel URL
-2. Paste it here  
-3. Wait for download to complete
-4. Receive your media files!
-
-**Supported URLs:**
-• instagram.com/p/...
-• instagram.com/reel/...
-• instagram.com/tv/...
-
-**Note:** Due to Instagram's restrictions on cloud servers, some downloads may fail. If you get a "temporarily blocked" message, wait 10-15 minutes and try again.
-    """
-    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 if __name__ == '__main__':
     main()
